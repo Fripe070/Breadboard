@@ -290,7 +290,7 @@ class Breadboard(ModuleCog):
     command_group = app_commands.Group(
         name="starboard",
         description="Manage starboards",
-        default_permissions=discord.Permissions(administrator=True),
+        default_permissions=discord.Permissions(manage_channels=True),
         guild_only=True,
     )
 
