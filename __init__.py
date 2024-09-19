@@ -23,6 +23,7 @@ class ChannelConfigOverrideDict(TypedDict):
     required_reactions: int | None
     extra_emojis: list[str] | None
     allow_self_star: bool | None
+    allow_any_emoji: bool | None
 
 
 @dataclasses.dataclass
@@ -31,6 +32,7 @@ class ChannelConfigOverride:
     required_reactions: int | None = None
     extra_emojis: list[discord.PartialEmoji] | None = None
     allow_self_star: bool | None = None
+    allow_any_emoji: bool | None = None
 
 
 class ChannelConfigDict(TypedDict):
@@ -42,6 +44,7 @@ class ChannelConfigDict(TypedDict):
     exclude: list[ChannelID]
     exclude_is_include: bool
     allow_self_star: bool
+    allow_any_emoji: bool
 
 
 @dataclasses.dataclass
@@ -50,13 +53,17 @@ class StarboardChannelConfig:
     required_reactions: int
     watched_emojis: list[discord.PartialEmoji]
 
-    # Added after-the-fact, so we need to handle the case where it's not present
+    # Added after-the-fact, so we need to handle the case where they're not present
     channel_overrides: dict[ChannelID, ChannelConfigOverride] = dataclasses.field(default_factory=dict)
     exclude: list[ChannelID] = dataclasses.field(default_factory=list)
     exclude_is_include: bool = False
     allow_self_star: bool = False
+    allow_any_emoji: bool = False
 
     def is_watched(self, emoji: AnyEmoji, *, channel_id: ChannelID) -> bool:
+        if self.allow_any_emoji:
+            return True
+
         if isinstance(emoji, str):
             emoji = discord.PartialEmoji.from_str(emoji)
 
@@ -87,16 +94,19 @@ class GuildConfigs(dict[GuildID, dict[ChannelID, StarboardChannelConfig]]):
                     channel_overrides={
                         override["override_for"]: ChannelConfigOverride(
                             override_for=override["override_for"],
-                            required_reactions=override["required_reactions"],
+                            required_reactions=override.get("required_reactions"),
                             extra_emojis=list(
                                 map(discord.PartialEmoji.from_str, override["extra_emojis"]),
-                            ) if override["extra_emojis"] else None,
+                            ) if override.get("extra_emojis") else None,
+                            allow_self_star=override.get("allow_self_star"),
+                            allow_any_emoji=override.get("allow_any_emoji"),
                         )
                         for override in channel.get("channel_overrides", [])
                     },
                     exclude=channel.get("exclude", []),
                     exclude_is_include=channel.get("exclude_is_include", False),
                     allow_self_star=channel.get("allow_self_star", False),
+                    allow_any_emoji=channel.get("allow_any_emoji", False),
                 )
                 for channel in channels
             }
@@ -116,12 +126,14 @@ class GuildConfigs(dict[GuildID, dict[ChannelID, StarboardChannelConfig]]):
                             "required_reactions": override.required_reactions,
                             "extra_emojis": list(map(str, override.extra_emojis)) if override.extra_emojis else None,
                             "allow_self_star": override.allow_self_star,
+                            "allow_any_emoji": override.allow_any_emoji,
                         }
                         for override in channel.channel_overrides.values()
                     ],
                     "exclude": channel.exclude,
                     "exclude_is_include": channel.exclude_is_include,
                     "allow_self_star": channel.allow_self_star,
+                    "allow_any_emoji": channel.allow_any_emoji,
                 }
                 for channel in channels.values()
             ]
@@ -256,6 +268,16 @@ class OverrideModal(discord.ui.Modal):
         placeholder="👍, 👎",
         required=False,
     )
+    add_self_star_input = discord.ui.TextInput(
+        label="Allow self-starring",
+        placeholder="True or False",
+        required=False,
+    )
+    add_any_emoji_input = discord.ui.TextInput(
+        label="Allow any emoji",
+        placeholder="True or False",
+        required=False,
+    )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
@@ -274,6 +296,13 @@ class OverrideModal(discord.ui.Modal):
                     ephemeral=True,
                 )
 
+        def parse_bool(value: str) -> bool | None:
+            if value.lower().strip().startswith(("t", "y")):
+                return True
+            if value.lower().strip().startswith(("f", "n")):
+                return False
+            return None
+
         self.override = ChannelConfigOverride(
             override_for=channel_input,
             required_reactions=required_reactions,
@@ -281,6 +310,8 @@ class OverrideModal(discord.ui.Modal):
                 discord.PartialEmoji.from_str(emoji.strip())
                 for emoji in self.extra_emojis_input.value.split(",")
             ] if self.extra_emojis_input.value else None,
+            allow_self_star=parse_bool(self.add_self_star_input.value),
+            allow_any_emoji=parse_bool(self.add_any_emoji_input.value),
         )
         self.stop()
         await interaction.response.defer()
@@ -304,6 +335,7 @@ class Breadboard(ModuleCog):
         channel: discord.TextChannel,
         required_reactions: int | None = None,
         allow_self_star: bool | None = None,
+        allow_any_emoji: bool | None = None,
     ) -> None:
         if required_reactions is None:
             required_reactions = cast(int, self.settings.default_required_stars.value)
@@ -327,6 +359,11 @@ class Breadboard(ModuleCog):
                 allow_self_star
                 if allow_self_star is not None else
                 self.settings.default_allow_self_star.value
+            ),
+            allow_any_emoji=(
+                allow_any_emoji
+                if allow_any_emoji is not None else
+                self.settings.default_allow_any_emoji.value
             ),
         )
         try:
@@ -354,6 +391,7 @@ class Breadboard(ModuleCog):
         channel: discord.TextChannel,
         required_reactions: int | None = None,
         allow_self_star: bool | None = None,
+        allow_any_emoji: bool | None = None,
     ) -> None:
         if required_reactions is not None and required_reactions <= 0:
             return await interaction.response.send_message("Required reactions must be greater than 0", ephemeral=True)
@@ -371,6 +409,9 @@ class Breadboard(ModuleCog):
         if allow_self_star is not None:
             relevant_config.allow_self_star = allow_self_star
             message += f"{'allowing' if allow_self_star else 'disallowing'} self-starring, "
+        if allow_any_emoji is not None:
+            relevant_config.allow_any_emoji = allow_any_emoji
+            message += f"{'allowing' if allow_any_emoji else 'disallowing'} any emoji, "
         start, sep, end = message.rstrip().removesuffix(",").rpartition(", ")
         message = f"{start} and {end}" if sep else end
 
